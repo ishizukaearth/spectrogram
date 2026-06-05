@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Guitar Realtime Spectrogram v2c fixed</title>
+<style>
+:root{--bg:#0f1115;--panel:#1b2028;--fg:#f5f7fb;--muted:#aab3c0;--line:#3b4350;--green:#16a34a;--red:#dc2626;--orange:#f59e0b}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+header{padding:10px 12px;border-bottom:1px solid var(--line);background:#151922;position:sticky;top:0;z-index:10} h1{font-size:18px;margin:0 0 8px}
+.buttons{display:flex;gap:8px;flex-wrap:wrap;align-items:center} button{border:0;border-radius:10px;color:#fff;font-weight:700;font-size:15px;padding:10px 14px;min-height:42px}.green{background:var(--green)}.red{background:var(--red)}.orange{background:var(--orange)}#status{font-size:13px;color:var(--muted);margin-left:auto}.hidden{display:none!important}
+main{height:calc(100vh - 74px);display:flex;flex-direction:column;padding:8px;gap:8px;overflow:hidden}
+#settingsPanel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px;flex:0 0 auto}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}
+label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:13px} input,select{font-size:16px;border:1px solid var(--line);border-radius:8px;background:#0c0f14;color:var(--fg);padding:8px}.hint{font-size:13px;color:var(--muted);margin:8px 0 0}
+#wrap{position:relative;width:100%;flex:1 1 auto;min-height:280px;background:#020304;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+canvas{position:absolute;top:0;height:100%;image-rendering:auto}#axis{left:0;width:62px;background:#07090d;z-index:3;border-right:1px solid rgba(255,255,255,.18)}#spec{left:62px;right:0;width:calc(100% - 62px);z-index:1}#overlay{left:62px;right:0;width:calc(100% - 62px);z-index:2;pointer-events:none}
+</style>
+</head>
+<body>
+<header><h1>Guitar Realtime Spectrogram v2c fixed</h1><div class="buttons"><button id="micBtn" class="green">マイク開始</button><button id="pauseBtn" class="orange">一時停止</button><span id="status">停止中</span></div></header>
+<main>
+<section id="settingsPanel"><div class="grid">
+<label>FFTサイズ<select id="fftSize"><option>1024</option><option selected>2048</option><option>4096</option><option>8192</option><option>16384</option><option>32768</option></select></label>
+<label>最小音<select id="minNote"></select></label><label>最大音<select id="maxNote"></select></label><label>A4基準Hz<input id="a4" type="number" value="440" step="0.1"></label><label>感度<input id="gain" type="range" min="1" max="8" value="3" step="0.1"></label><label>赤丸しきい値<input id="threshold" type="range" min="20" max="220" value="90"></label>
+</div><p class="hint">録音中はこの設定パネルを自動で閉じます。停止・一時停止では表示します。</p></section>
+<div id="wrap"><canvas id="axis"></canvas><canvas id="spec"></canvas><canvas id="overlay"></canvas></div>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id); const axis=$('axis'), spec=$('spec'), overlay=$('overlay'); const ax=axis.getContext('2d'), sx=spec.getContext('2d'), ox=overlay.getContext('2d');
+const NOTE_NAMES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']; let notes=[];
+function midiToName(m){return NOTE_NAMES[m%12]+(Math.floor(m/12)-1)} function midiToFreq(m,a4=440){return a4*Math.pow(2,(m-69)/12)}
+function initNotes(){ const min=$('minNote'), max=$('maxNote'); for(let m=28;m<=95;m++){ const o=document.createElement('option'); o.value=m; o.textContent=midiToName(m); min.appendChild(o.cloneNode(true)); max.appendChild(o); } min.value=40; max.value=83; }
+function rebuildNotes(){ const a4=parseFloat($('a4').value)||440, lo=+$('minNote').value, hi=+$('maxNote').value; notes=[]; for(let m=lo;m<=hi;m++) notes.push({m,name:midiToName(m),freq:midiToFreq(m,a4)}); drawAxis(); }
+function resize(){ const dpr=Math.max(1,window.devicePixelRatio||1); const wr=$('wrap').getBoundingClientRect(); const aw=62; axis.width=Math.round(aw*dpr); axis.height=Math.round(wr.height*dpr); spec.width=Math.max(10,Math.round((wr.width-aw)*dpr)); spec.height=Math.round(wr.height*dpr); overlay.width=spec.width; overlay.height=spec.height; [ax,sx,ox].forEach(c=>c.setTransform(dpr,0,0,dpr,0,0)); sx.fillStyle='#020304'; sx.fillRect(0,0,spec.width/dpr,spec.height/dpr); ox.clearRect(0,0,overlay.width/dpr,overlay.height/dpr); drawAxis(); }
+function yForFreq(f){ const h=axis.clientHeight; const lo=notes[0]?.freq||80, hi=notes[notes.length-1]?.freq||1000; return h-(Math.log(f/lo)/Math.log(hi/lo))*h; }
+function drawAxis(){ const w=axis.clientWidth,h=axis.clientHeight; ax.clearRect(0,0,w,h); ax.fillStyle='#07090d'; ax.fillRect(0,0,w,h); ax.font='12px system-ui'; ax.textAlign='right'; ax.textBaseline='middle'; ax.strokeStyle='rgba(255,255,255,.16)'; ax.fillStyle='rgba(245,247,251,.9)'; for(const n of notes){ const y=yForFreq(n.freq); if(y<0||y>h) continue; ax.beginPath(); ax.moveTo(w-7,y); ax.lineTo(w,y); ax.stroke(); if(n.name.includes('C')||n.name.includes('E')||n.name.includes('A')) ax.fillText(n.name,w-10,y); } }
+let audioCtx, analyser, source, stream, freqData, raf=0, running=false, paused=false;
+async function start(){ try{ stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}}); audioCtx=new (window.AudioContext||window.webkitAudioContext)(); source=audioCtx.createMediaStreamSource(stream); analyser=audioCtx.createAnalyser(); analyser.fftSize=+$('fftSize').value; analyser.smoothingTimeConstant=0.05; freqData=new Uint8Array(analyser.frequencyBinCount); source.connect(analyser); running=true; paused=false; $('micBtn').textContent='マイク終了'; $('micBtn').className='red'; $('pauseBtn').textContent='一時停止'; $('settingsPanel').classList.add('hidden'); $('status').textContent='録音中'; loop(); }catch(e){ alert('マイクを開始できません: '+e.message); }}
+function stop(){ running=false; paused=false; cancelAnimationFrame(raf); if(stream) stream.getTracks().forEach(t=>t.stop()); if(audioCtx) audioCtx.close(); stream=null; audioCtx=null; $('micBtn').textContent='マイク開始'; $('micBtn').className='green'; $('pauseBtn').textContent='一時停止'; $('settingsPanel').classList.remove('hidden'); $('status').textContent='停止中'; }
+function togglePause(){ if(!running)return; paused=!paused; $('pauseBtn').textContent=paused?'再開':'一時停止'; $('settingsPanel').classList.toggle('hidden',!paused); $('status').textContent=paused?'一時停止中':'録音中'; if(!paused) loop(); }
+function color(v){ // black-blue-red-yellow-white
+ const x=Math.max(0,Math.min(255,v)); let r=0,g=0,b=0; if(x<70){b=x*3;} else if(x<140){b=210-(x-70)*2; r=(x-70)*3;} else if(x<210){r=210; g=(x-140)*3;} else {r=230; g=210; b=(x-210)*5;} return [r,g,b,255]; }
+function drawFrame(){ const dpr=Math.max(1,window.devicePixelRatio||1), w=spec.width/dpr, h=spec.height/dpr; sx.drawImage(spec,-1,0,w,h); analyser.getByteFrequencyData(freqData); const sr=audioCtx.sampleRate, binHz=sr/analyser.fftSize, gain=parseFloat($('gain').value)||3; const img=sx.createImageData(1,Math.ceil(h)); let peakMidi=null, peakVal=0; for(let y=0;y<h;y++){ const frac=1-y/h; const f=(notes[0].freq)*Math.pow((notes[notes.length-1].freq/notes[0].freq),frac); const bin=Math.max(0,Math.min(freqData.length-1,Math.round(f/binHz))); const v=Math.min(255,freqData[bin]*gain); const [r,g,b,a]=color(v); const p=y*4; img.data[p]=r; img.data[p+1]=g; img.data[p+2]=b; img.data[p+3]=a; }
+ sx.putImageData(img,Math.floor(w-1),0); ox.drawImage(overlay,-1,0,w,h); ox.clearRect(w-3,0,3,h);
+ for(const n of notes){ const f=n.freq, bw=Math.pow(2,10/1200); const b1=Math.floor((f/bw)/binHz), b2=Math.ceil((f*bw)/binHz); let sum=0,c=0; for(let b=b1;b<=b2;b++){ if(b>=0&&b<freqData.length){sum+=freqData[b];c++;}} const v=c?sum/c:0; if(v>peakVal){peakVal=v; peakMidi=n.m;} }
+ if(peakVal>+$('threshold').value && peakMidi!==null){ const n=notes.find(x=>x.m===peakMidi); const y=yForFreq(n.freq); ox.fillStyle='rgba(255,40,40,.95)'; ox.beginPath(); ox.arc(w-6,y,4,0,Math.PI*2); ox.fill(); }
+}
+function loop(){ if(!running||paused)return; drawFrame(); raf=requestAnimationFrame(loop); }
+$('micBtn').onclick=()=>running?stop():start(); $('pauseBtn').onclick=togglePause; ['fftSize','minNote','maxNote','a4'].forEach(id=>$(id).addEventListener('change',()=>{ if(running){stop();} rebuildNotes(); resize(); })); window.addEventListener('resize',resize); initNotes(); rebuildNotes(); resize();
+</script>
+</body></html>
