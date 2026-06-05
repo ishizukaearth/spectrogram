@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Guitar Realtime Spectrogram v2f</title>
+  <style>
+    :root{--bg:#171717;--fg:#f2f2f2;--muted:#aaa;--line:#3154ff;--accent:#67c56e;--warn:#e15b5b;--panel:#242424;}
+    body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;}
+    .wrap{max-width:760px;margin:0 auto;padding:14px 10px 18px;}
+    h1{font-size:18px;line-height:1.35;margin:4px 0 10px;}
+    .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0;}
+    button,select,input{font-size:14px;border-radius:7px;border:1px solid #555;background:#222;color:var(--fg);padding:7px 9px;}
+    button{font-weight:700;border:0;}
+    .start{background:var(--accent);color:#08240b}.pause{background:#d29b37;color:#201200}.stop{background:var(--warn);color:#fff}.small{font-size:12px;padding:5px 7px}
+    label{display:inline-flex;gap:5px;align-items:center;color:#ddd;}
+    input[type=range]{width:140px;padding:0} input[type=number]{width:72px;}
+    .hint{color:var(--muted);font-size:12px;line-height:1.45;margin:6px 0;}
+    .status{font-size:12px;color:#ddd;margin-top:6px;min-height:1.4em;}
+    .canvasBox{position:relative;border-top:1px solid #333;border-bottom:1px solid #333;background:#000;overflow:hidden;touch-action:none;}
+    canvas{display:block;width:100%;height:560px;background:#000;}
+    #onset{position:absolute;left:0;top:0;pointer-events:none;background:transparent;}
+    #settingsPanel.hidden{display:none;}
+    .settingsPanel{border:1px solid #3d4655;border-radius:12px;padding:8px;margin:8px 0;background:#1d222b;}
+    .readout{background:var(--panel);border-radius:8px;padding:6px 8px;margin:6px 0;font-size:12px;color:#eee;white-space:pre-wrap;}
+    .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+    .hidden{display:none;}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Guitar Realtime Spectrogram v2f</h1>
+
+  <div class="controls">
+    <button id="startBtn" class="start">マイク開始</button>
+    <button id="pauseBtn" class="pause" disabled>一時停止</button>
+    <button id="settingsBtn" class="small">設定を表示</button>
+    <button id="stopBtn" class="stop" disabled>終了</button>
+    <label>FFT
+      <select id="fftSize">
+        <option>256</option><option>512</option><option selected>1024</option><option>2048</option><option>4096</option><option>8192</option><option>16384</option><option>32768</option>
+      </select>
+    </label>
+  </div>
+
+  <div id="settingsPanel" class="settingsPanel hidden">
+  <div class="controls">
+    <label>表示音域
+      <select id="rangePreset">
+        <option value="E2:E5">E2〜E5（ギター基音）</option>
+        <option value="E2:B6" selected>E2〜B6（広域）</option>
+        <option value="E2:D4">E2〜D4（低音）</option>
+        <option value="B3:B6">B3〜B6（高音）</option>
+        <option value="custom">任意指定</option>
+      </select>
+    </label>
+    <span id="customRange" class="hidden">
+      <label>下限 <input id="minNote" value="E2" /></label>
+      <label>上限 <input id="maxNote" value="B6" /></label>
+      <button id="applyRange" class="small">適用</button>
+    </span>
+  </div>
+
+  <div class="controls">
+    <label>A4基準 <input id="a4Hz" type="number" step="0.1" value="440.0"> Hz</label>
+    <label>上方余裕 <input id="upperCents" type="number" step="1" value="10"> c</label>
+    <label>下方幅 <input id="lowerCents" type="number" step="1" value="50"> c</label>
+  </div>
+
+  <div class="controls">
+    <label>マイク増幅 <input id="micGain" type="range" min="1" max="100" step="1" value="5"><span id="micGainVal">5.0x</span></label>
+    <label>表示感度 <input id="displayGain" type="range" min="0" max="60" step="1" value="24"><span id="displayGainVal">+24dB</span></label>
+    <label>赤点しきい値 <input id="riseThreshold" type="range" min="3" max="30" step="1" value="10"><span id="riseVal">10dB</span></label>
+  </div>
+
+  <div id="readout" class="readout">未開始</div>
+  </div>
+
+  <div class="hint">横方向＝時間、縦方向＝音程。黒→青→赤→白の順に強い成分です。赤丸は「急に増えた音程」の候補です。一時停止中はマイクを切らず、画面だけ固定します。強い成分と赤点候補は「設定を表示」で確認できます。</div>
+
+  <div class="canvasBox">
+    <canvas id="spec" width="720" height="520"></canvas>
+    <canvas id="onset" width="720" height="520"></canvas>
+  </div>
+  <div id="status" class="status">停止中です</div>
+</div>
+
+<script>
+'use strict';
+
+const canvas = document.getElementById('spec');
+const ctx = canvas.getContext('2d');
+const onsetCanvas = document.getElementById('onset');
+const onsetCtx = onsetCanvas.getContext('2d');
+const startBtn = document.getElementById('startBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+const settingsBtn = document.getElementById('settingsBtn');
+const settingsPanel = document.getElementById('settingsPanel');
+const stopBtn = document.getElementById('stopBtn');
+const fftSel = document.getElementById('fftSize');
+const rangePreset = document.getElementById('rangePreset');
+const customRange = document.getElementById('customRange');
+const minNoteEl = document.getElementById('minNote');
+const maxNoteEl = document.getElementById('maxNote');
+const applyRange = document.getElementById('applyRange');
+const a4HzEl = document.getElementById('a4Hz');
+const upperCentsEl = document.getElementById('upperCents');
+const lowerCentsEl = document.getElementById('lowerCents');
+const micGainEl = document.getElementById('micGain');
+const displayGainEl = document.getElementById('displayGain');
+const riseThresholdEl = document.getElementById('riseThreshold');
+const micGainVal = document.getElementById('micGainVal');
+const displayGainVal = document.getElementById('displayGainVal');
+const riseVal = document.getElementById('riseVal');
+const readout = document.getElementById('readout');
+const statusEl = document.getElementById('status');
+
+let audioCtx, analyser, source, gainNode, stream;
+let freqData;
+let rafId = null;
+let running = false;
+let paused = false;
+let minMidi = 40; // E2
+let maxMidi = 95; // B6
+let prevNoteDb = new Map();
+let lastOnsetTimeByNote = new Map();
+let startTime = 0;
+let lastDraw = 0;
+let lastPeakText = '';
+
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+function noteNameToMidi(s){
+  const m = String(s).trim().toUpperCase().match(/^([A-G])(#|B)?(-?\d+)$/);
+  if(!m) return null;
+  let name = m[1] + (m[2] || '');
+  name = name.replace('CB','B').replace('DB','C#').replace('EB','D#').replace('FB','E').replace('GB','F#').replace('AB','G#').replace('BB','A#');
+  const idx = NOTE_NAMES.indexOf(name);
+  if(idx < 0) return null;
+  return (parseInt(m[3],10)+1)*12 + idx;
+}
+function midiToName(n){return NOTE_NAMES[((n%12)+12)%12] + (Math.floor(n/12)-1);}
+function midiToFreq(m){return Number(a4HzEl.value || 440) * Math.pow(2, (m-69)/12);}
+function freqToMidi(f){return 69 + 12*Math.log2(f/Number(a4HzEl.value || 440));}
+
+function resizeCanvas(){
+  // Use CSS-pixel canvas coordinates intentionally.
+  // iPhone devicePixelRatio scaling caused getImageData/putImageData to scroll only the left half.
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(320, Math.round(rect.width));
+  canvas.height = Math.max(420, Math.round(rect.height));
+  onsetCanvas.width = canvas.width;
+  onsetCanvas.height = canvas.height;
+  onsetCanvas.style.width = rect.width + 'px';
+  onsetCanvas.style.height = rect.height + 'px';
+  ctx.setTransform(1,0,0,1,0,0);
+  onsetCtx.setTransform(1,0,0,1,0,0);
+  clearCanvas();
+  clearOnsets();
+}
+function cssW(){return canvas.width;}
+function cssH(){return canvas.height;}
+
+function clearCanvas(){
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,cssW(),cssH());
+  drawGrid();
+}
+function clearOnsets(){
+  onsetCtx.clearRect(0,0,onsetCanvas.width,onsetCanvas.height);
+}
+function yForMidi(m){
+  const top = 8, bottom = cssH()-10;
+  return bottom - (m - minMidi) / (maxMidi - minMidi) * (bottom - top);
+}
+function drawGrid(){
+  const w=cssW();
+  ctx.save();
+  ctx.font='12px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif';
+  for(let m=Math.ceil(minMidi); m<=Math.floor(maxMidi); m++){
+    const y = yForMidi(m);
+    const isNatural = !midiToName(m).includes('#');
+    ctx.strokeStyle = isNatural ? 'rgba(70,95,255,0.75)' : 'rgba(60,60,120,0.45)';
+    ctx.lineWidth = isNatural ? 1 : 0.5;
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke();
+    // 音名文字はスペクトログラムを隠すため描画しない。
+    // 目盛線だけを表示する。
+  }
+  ctx.restore();
+}
+function colorForDb(db){
+  // Energy color map: black -> blue -> red -> white.
+  let v = (db + 95) / 65;
+  v = Math.max(0, Math.min(1, v));
+  let r=0,g=0,b=0;
+  if(v < 0.33){
+    const t = v/0.33; r = 0; g = 0; b = Math.round(255*t);
+  }else if(v < 0.72){
+    const t = (v-0.33)/0.39; r = Math.round(255*t); g = 0; b = Math.round(255*(1-t));
+  }else{
+    const t = (v-0.72)/0.28; r = 255; g = Math.round(255*t); b = Math.round(255*t);
+  }
+  return `rgb(${r},${g},${b})`;
+}
+
+function updateRange(){
+  let lo='E2', hi='E5';
+  if(rangePreset.value === 'custom'){
+    customRange.classList.remove('hidden');
+    lo=minNoteEl.value; hi=maxNoteEl.value;
+  }else{
+    customRange.classList.add('hidden');
+    [lo,hi]=rangePreset.value.split(':');
+    minNoteEl.value=lo; maxNoteEl.value=hi;
+  }
+  const a=noteNameToMidi(lo), b=noteNameToMidi(hi);
+  if(a!==null && b!==null && b>a){minMidi=a; maxMidi=b; prevNoteDb.clear(); clearCanvas();}
+}
+function noteDbFromBins(){
+  const sr = audioCtx.sampleRate;
+  const binHz = sr / analyser.fftSize;
+  const displayGain = Number(displayGainEl.value || 0);
+  const upperC = Number(upperCentsEl.value || 10);
+  const lowerC = Number(lowerCentsEl.value || 50);
+  const out = new Map();
+  for(let m=Math.ceil(minMidi); m<=Math.floor(maxMidi); m++) out.set(m, -120);
+  for(let i=1; i<freqData.length; i++){
+    const f = i * binHz;
+    if(f < midiToFreq(minMidi-1) || f > midiToFreq(maxMidi+1)) continue;
+    const midi = freqToMidi(f);
+    const nearest = Math.round(midi);
+    if(nearest < minMidi || nearest > maxMidi) continue;
+    const cents = (midi - nearest) * 100;
+    if(cents >= -lowerC && cents <= upperC){
+      const db = freqData[i] + displayGain;
+      if(db > out.get(nearest)) out.set(nearest, db);
+    }
+  }
+  return out;
+}
+function drawColumn(noteDb){
+  const w=cssW(), h=cssH();
+  // Scroll left by 1 px, then draw a new column.
+  const img = ctx.getImageData(1,0,Math.max(1,w-1),h);
+  ctx.putImageData(img,0,0);
+  ctx.fillStyle='#000'; ctx.fillRect(w-1,0,1,h);
+
+  for(const [m,db] of noteDb.entries()){
+    if(db < -90) continue;
+    const y = yForMidi(m);
+    const y2 = yForMidi(m+1);
+    const bandH = Math.max(1, Math.abs(y-y2));
+    ctx.fillStyle = colorForDb(db);
+    ctx.fillRect(w-2, y-bandH/2, 2, Math.max(1, bandH));
+  }
+  // grid overlay every frame lightly
+  if(Math.random()<0.12) drawGrid();
+}
+function detectOnsets(noteDb){
+  const threshold = Number(riseThresholdEl.value || 10);
+  const now = audioCtx.currentTime - startTime;
+  const events=[];
+  for(const [m,db] of noteDb.entries()){
+    const prev = prevNoteDb.get(m) ?? -120;
+    const rise = db - prev;
+    const last = lastOnsetTimeByNote.get(m) ?? -999;
+    if(db > -72 && rise >= threshold && now-last > 0.08){
+      events.push({m, db, rise, t:now});
+      lastOnsetTimeByNote.set(m, now);
+    }
+    prevNoteDb.set(m, db*0.65 + prev*0.35);
+  }
+  return events.sort((a,b)=>b.rise-a.rise).slice(0,5);
+}
+function drawOnsetDots(events){
+  // Red onset markers are drawn on a separate overlay canvas.
+  // They are not scrolled with the spectrogram, so they do not become permanent red lines.
+  clearOnsets();
+  const x = cssW()-10;
+  onsetCtx.save();
+  onsetCtx.strokeStyle='rgba(255,60,60,0.95)';
+  onsetCtx.fillStyle='rgba(255,60,60,0.16)';
+  onsetCtx.lineWidth=2;
+  for(const e of events){
+    const y=yForMidi(e.m);
+    onsetCtx.beginPath(); onsetCtx.arc(x,y,5,0,Math.PI*2); onsetCtx.fill(); onsetCtx.stroke();
+  }
+  onsetCtx.restore();
+}
+function updateReadout(noteDb, events){
+  const peaks = [...noteDb.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5)
+    .map(([m,db]) => `${midiToName(m)} ${midiToFreq(m).toFixed(1)}Hz ${db.toFixed(1)}dB`).join('\n');
+  const ev = events.map(e => `${e.t.toFixed(3)}s  ${midiToName(e.m)}  +${e.rise.toFixed(1)}dB`).join('\n');
+  lastPeakText = `基準 A4=${Number(a4HzEl.value).toFixed(1)}Hz / 表示 ${midiToName(minMidi)}〜${midiToName(maxMidi)} / FFT ${analyser.fftSize}\n強い成分:\n${peaks || '-'}\n赤点候補:\n${ev || '-'}`;
+  readout.textContent = lastPeakText;
+}
+function loop(ts){
+  if(!running) return;
+  rafId = requestAnimationFrame(loop);
+  if(paused) return;
+  // throttle draw: smaller FFT can update quickly; 30fps enough for viewing.
+  if(ts - lastDraw < 30) return;
+  lastDraw = ts;
+  analyser.getFloatFrequencyData(freqData);
+  const noteDb = noteDbFromBins();
+  const events = detectOnsets(noteDb);
+  drawColumn(noteDb);
+  if(events.length) drawOnsetDots(events); else clearOnsets();
+  updateReadout(noteDb, events);
+}
+async function startMic(){
+  if(running) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false}, video:false});
+  source = audioCtx.createMediaStreamSource(stream);
+  gainNode = audioCtx.createGain();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = Number(fftSel.value);
+  analyser.smoothingTimeConstant = 0.12;
+  analyser.minDecibels = -110;
+  analyser.maxDecibels = -10;
+  gainNode.gain.value = Number(micGainEl.value);
+  source.connect(gainNode); gainNode.connect(analyser);
+  freqData = new Float32Array(analyser.frequencyBinCount);
+  running = true; paused = false; startTime = audioCtx.currentTime; prevNoteDb.clear(); lastOnsetTimeByNote.clear(); clearCanvas();
+  startBtn.disabled=true; pauseBtn.disabled=false; stopBtn.disabled=false; pauseBtn.textContent='一時停止';
+  statusEl.textContent = '録音・解析中です';
+  rafId = requestAnimationFrame(loop);
+}
+function pauseResume(){
+  if(!running) return;
+  paused = !paused;
+  if(paused){
+    clearOnsets(); // 一時停止中は赤丸描画も止める
+  }
+  pauseBtn.textContent = paused ? '再開' : '一時停止';
+  statusEl.textContent = paused ? '一時停止中です。画面は固定、マイクは保持しています。' : '録音・解析中です';
+}
+function stopMic(){
+  running=false; paused=false;
+  if(rafId) cancelAnimationFrame(rafId);
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); }
+  if(audioCtx){ audioCtx.close(); }
+  startBtn.disabled=false; pauseBtn.disabled=true; stopBtn.disabled=true; pauseBtn.textContent='一時停止';
+  clearOnsets();
+  statusEl.textContent='停止しました';
+}
+
+startBtn.addEventListener('click', () => startMic().catch(e => {statusEl.textContent='マイク開始エラー: '+e.message;}));
+pauseBtn.addEventListener('click', pauseResume);
+settingsBtn.addEventListener('click', () => {
+  const hide = !settingsPanel.classList.contains('hidden');
+  settingsPanel.classList.toggle('hidden', hide);
+  settingsBtn.textContent = hide ? '設定を表示' : '設定を隠す';
+});
+stopBtn.addEventListener('click', stopMic);
+fftSel.addEventListener('change', () => { if(analyser){ analyser.fftSize=Number(fftSel.value); freqData=new Float32Array(analyser.frequencyBinCount); prevNoteDb.clear(); clearCanvas(); }});
+rangePreset.addEventListener('change', updateRange);
+applyRange.addEventListener('click', updateRange);
+a4HzEl.addEventListener('change', () => { prevNoteDb.clear(); clearCanvas(); });
+[upperCentsEl, lowerCentsEl].forEach(el => el.addEventListener('change', () => prevNoteDb.clear()));
+micGainEl.addEventListener('input', () => { micGainVal.textContent=Number(micGainEl.value).toFixed(1)+'x'; if(gainNode) gainNode.gain.value=Number(micGainEl.value); });
+displayGainEl.addEventListener('input', () => { displayGainVal.textContent='+'+displayGainEl.value+'dB'; });
+riseThresholdEl.addEventListener('input', () => { riseVal.textContent=riseThresholdEl.value+'dB'; });
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas(); updateRange();
+</script>
+</body>
+</html>
